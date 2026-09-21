@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Bài kiểm tra Python cơ bản</h1>
+<p class="lead">{{ total }} câu hỏi, chia theo {{ topics|length }} chủ đề. Trả lời xong bấm nộp bài để xem chủ đề nào cần ôn thêm.</p>
+
+<form method="post" action="{{ url_for('submit') }}">
+  {% for topic, questions in topics %}
+    <div class="topic-title">{{ topic }}</div>
+    {% for q in questions %}
+      <fieldset class="card" style="border:1px solid var(--line)">
+        <legend class="q-title" style="padding:0 6px">Câu {{ q.id }}. {{ q.question }}</legend>
+        {% for key in ['A', 'B', 'C', 'D'] %}
+          <label class="opt">
+            <input type="radio" name="q{{ q.id }}" value="{{ key }}">
+            <span><b>{{ key }}.</b> <code>{{ q[key] }}</code></span>
+          </label>
+        {% endfor %}
+      </fieldset>
+    {% endfor %}
+  {% endfor %}
+  <div class="actions"><button type="submit">Nộp bài</button></div>
+</form>
+{% endblock %}

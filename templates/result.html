@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Kết quả - Ôn thi Python{% endblock %}
+{% block content %}
+<h1>Kết quả bài làm</h1>
+<div class="card">
+  <div class="score">{{ score }}<small> / {{ total }} câu đúng</small></div>
+</div>
+
+<h2>Tỉ lệ đúng theo chủ đề</h2>
+<div class="card">
+  {% for t in stats %}
+    <div class="row">
+      <div>
+        <div class="name">
+          <span>{{ t.topic }} {% if t.weak %}<span class="tag">Cần ôn</span>{% endif %}</span>
+          <span style="color:var(--muted)">{{ t.right }}/{{ t.total }}</span>
+        </div>
+        <div class="meter {{ 'weak' if t.weak }}"><span style="width: {{ (t.rate * 100)|round|int }}%"></span></div>
+      </div>
+      <div class="pct {{ 'weak' if t.weak }}">{{ (t.rate * 100)|round|int }}%</div>
+    </div>
+  {% endfor %}
+</div>
+
+{% if tips %}
+  <h2>Gợi ý ôn tập</h2>
+  {% for topic, tip in tips %}
+    <div class="tip"><b>{{ topic }}</b>{{ tip }}</div>
+  {% endfor %}
+{% else %}
+  <div class="card">Bạn không có chủ đề yếu nào. Có thể thử lại để giữ phong độ.</div>
+{% endif %}
+
+{% if wrong %}
+  <h2>Các câu làm sai</h2>
+  {% for q in wrong %}
+    <div class="card wrong">
+      <p class="q-title">Câu {{ q.id }}. {{ q.question }}</p>
+      <p class="yours">Bạn chọn: {% if q.chosen %}<code>{{ q[q.chosen] }}</code>{% else %}(bỏ trống){% endif %}</p>
+      <p class="right">Đáp án đúng: <code>{{ q[q.answer] }}</code></p>
+      <p style="color:var(--muted)">{{ q.explanation }}</p>
+    </div>
+  {% endfor %}
+{% endif %}
+
+<div class="actions">
+  <a class="btn" href="{{ url_for('quiz') }}">Làm lại</a>
+  <a class="btn ghost" href="{{ url_for('history') }}">Xem thống kê các lần thi</a>
+</div>
+{% endblock %}
