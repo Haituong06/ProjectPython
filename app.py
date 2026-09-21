@@ -1,135 +1,176 @@
-"""Web trắc nghiệm ôn thi Python - có thống kê và gợi ý chủ đề yếu.
+"""Phân tích ngôn ngữ lập trình trên GitHub (demo môn Python).
 
-Python (pandas) đảm nhiệm phần xử lý chính:
-  - đọc ngân hàng câu hỏi từ questions.csv
-  - chấm điểm và thống kê tỉ lệ đúng theo từng chủ đề
-  - phát hiện chủ đề yếu và đưa ra gợi ý ôn tập
-  - lưu lịch sử làm bài (history.csv) và thống kê qua nhiều lần thi
+Python làm việc với web như sau:
+  1. requests  : gọi GitHub API để lấy dữ liệu trực tiếp từ web
+  2. pandas    : làm sạch và thống kê dữ liệu
+  3. matplotlib: vẽ biểu đồ và lưu thành ảnh
 
-Chạy:  python app.py   ->   mở http://127.0.0.1:5000
+Cài thư viện:  pip install requests pandas matplotlib
+Chạy:          python github_analysis.py
+Kết quả:       in bảng thống kê ra màn hình, lưu 2 file CSV và 1 ảnh biểu đồ
+               (github_analysis.png) cùng thư mục với file này.
+
+Lưu ý: GitHub cho phép ~10 lần tìm kiếm/phút nếu không đăng nhập. Chương trình
+tự chờ khi chạm giới hạn. Muốn nhanh hơn, tạo token miễn phí trên GitHub và đặt
+biến môi trường GITHUB_TOKEN.
 """
-from datetime import datetime
+import os
+import time
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import pandas as pd
-from flask import Flask, redirect, render_template, request, url_for
+import requests
 
-BASE_DIR = Path(__file__).parent
-QUESTIONS_CSV = BASE_DIR / "questions.csv"
-HISTORY_CSV = BASE_DIR / "history.csv"
-
-WEAK_THRESHOLD = 0.6  # tỉ lệ đúng dưới 60% được xem là chủ đề yếu
-
-STUDY_TIPS = {
-    "Biến & kiểu dữ liệu": "Ôn lại các kiểu int, float, str, bool và cách ép kiểu bằng int(), str(), float().",
-    "Vòng lặp & điều kiện": "Luyện for/while với range(start, stop, step) và phân biệt break với continue.",
-    "Hàm": "Xem lại cú pháp def, giá trị trả về (return/None) và tham số mặc định.",
-    "List & Dict": "Thực hành chỉ số âm, append(), và dict.get() thay cho truy cập trực tiếp.",
-    "File & thư viện": "Tập dùng with open(...) và làm quen pandas, Flask qua các ví dụ nhỏ.",
-}
-
-app = Flask(__name__)
+API_URL = "https://api.github.com/search/repositories"
+LANGUAGES = ["Python", "JavaScript", "TypeScript", "Java", "C++", "C#", "Go", "Rust", "PHP"]
+MIN_STARS = 1000      # repo có trên 1000 sao được xem là "phổ biến"
+TOP_N = 100           # số repo nhiều sao nhất toàn GitHub dùng để phân tích
+OUT_DIR = Path(__file__).parent
+# Các "ngôn ngữ" không phải ngôn ngữ lập trình (repo tài liệu, danh sách awesome...) -> loại khi so sánh
+NON_PROGRAMMING = {"Không xác định", "Markdown", "HTML", "CSS"}
 
 
-def load_questions() -> pd.DataFrame:
-    # keep_default_na=False để chữ "None" trong đáp án không bị hiểu thành giá trị rỗng
-    return pd.read_csv(QUESTIONS_CSV, dtype=str, keep_default_na=False)
+# ----------------------------------------------------------------------------
+# 1. LẤY DỮ LIỆU TỪ WEB (GitHub API)
+# ----------------------------------------------------------------------------
+def call_api(params: dict) -> dict:
+    """Gọi GitHub API, tự chờ và thử lại nếu chạm giới hạn số lần gọi."""
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "python-course-demo"}
+    token = os.getenv("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    for _ in range(3):
+        resp = requests.get(API_URL, params=params, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code in (403, 429) and resp.headers.get("X-RateLimit-Remaining") == "0":
+            reset_at = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
+            wait = min(max(reset_at - time.time(), 1) + 1, 90)
+            print(f"  GitHub giới hạn số lần gọi, chờ {wait:.0f} giây rồi thử lại...")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+    raise RuntimeError("Không lấy được dữ liệu từ GitHub sau 3 lần thử. Hãy thử lại sau ít phút.")
 
 
-def load_history() -> pd.DataFrame:
-    if not HISTORY_CSV.exists():
-        return pd.DataFrame(columns=["attempt", "time", "topic", "correct"])
-    history = pd.read_csv(HISTORY_CSV)
-    history["correct"] = history["correct"].astype(bool)
-    return history
+def fetch_language_stats() -> pd.DataFrame:
+    """Với mỗi ngôn ngữ: đếm số repo phổ biến và lấy repo nhiều sao nhất."""
+    rows = []
+    for lang in LANGUAGES:
+        print(f"  Đang lấy dữ liệu: {lang}")
+        data = call_api({
+            "q": f"language:{lang} stars:>{MIN_STARS}",
+            "sort": "stars", "order": "desc", "per_page": 1,
+        })
+        top = data["items"][0] if data["items"] else {}
+        rows.append({
+            "language": lang,
+            "popular_repos": data["total_count"],
+            "top_repo": top.get("full_name", ""),
+            "top_repo_stars": top.get("stargazers_count", 0),
+        })
+        time.sleep(1)
+    return pd.DataFrame(rows)
 
 
-def grade(questions: pd.DataFrame, form) -> pd.DataFrame:
-    """Gắn đáp án đã chọn và kết quả đúng/sai vào bảng câu hỏi."""
-    graded = questions.copy()
-    graded["chosen"] = graded["id"].map(lambda qid: form.get(f"q{qid}", ""))
-    graded["correct"] = graded["chosen"] == graded["answer"]
-    return graded
+def fetch_top_repos(n: int = TOP_N) -> pd.DataFrame:
+    """Lấy n repo nhiều sao nhất toàn GitHub."""
+    print(f"  Đang lấy {n} repo nhiều sao nhất")
+    data = call_api({"q": f"stars:>{MIN_STARS}", "sort": "stars", "order": "desc", "per_page": n})
+    return pd.DataFrame([
+        {
+            "repo": item["full_name"],
+            "language": item["language"] or "Không xác định",
+            "stars": item["stargazers_count"],
+        }
+        for item in data["items"]
+    ])
 
 
-def topic_stats(graded: pd.DataFrame) -> pd.DataFrame:
-    """Tổng hợp số câu đúng, tổng số câu và tỉ lệ đúng theo chủ đề."""
-    stats = (
-        graded.groupby("topic", sort=False)
-        .agg(right=("correct", "sum"), total=("correct", "size"))
+# ----------------------------------------------------------------------------
+# 2. PHÂN TÍCH BẰNG PANDAS
+# ----------------------------------------------------------------------------
+def analyze(languages: pd.DataFrame, top_repos: pd.DataFrame):
+    languages = languages.sort_values("popular_repos", ascending=False).reset_index(drop=True)
+    languages["share_%"] = (languages["popular_repos"] / languages["popular_repos"].sum() * 100).round(1)
+
+    programming = top_repos[~top_repos["language"].isin(NON_PROGRAMMING)]
+    excluded = len(top_repos) - len(programming)
+    by_language = (
+        programming.groupby("language")
+        .agg(repos=("repo", "count"), avg_stars=("stars", "mean"))
+        .sort_values("repos", ascending=False)
         .reset_index()
     )
-    stats["rate"] = stats["right"] / stats["total"]
-    stats["weak"] = stats["rate"] < WEAK_THRESHOLD
-    return stats
+    by_language["avg_stars"] = by_language["avg_stars"].round(0).astype(int)
+    return languages, by_language, excluded
 
 
-def save_attempt(graded: pd.DataFrame) -> None:
-    now = datetime.now()
-    rows = graded[["topic", "correct"]].copy()
-    rows.insert(0, "time", now.strftime("%Y-%m-%d %H:%M"))
-    rows.insert(0, "attempt", now.strftime("%Y%m%d%H%M%S%f"))
-    rows.to_csv(HISTORY_CSV, mode="a", header=not HISTORY_CSV.exists(), index=False)
+# ----------------------------------------------------------------------------
+# 3. VẼ BIỂU ĐỒ BẰNG MATPLOTLIB
+# ----------------------------------------------------------------------------
+def draw_charts(languages: pd.DataFrame, by_language: pd.DataFrame, path: Path) -> None:
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+    ordered = languages.sort_values("popular_repos")
+    bars = ax1.barh(ordered["language"], ordered["popular_repos"], color="#1f6f5c")
+    ax1.set_title(f"Số repo có trên {MIN_STARS:,} sao theo ngôn ngữ")
+    ax1.set_xlabel("Số repo")
+    ax1.bar_label(bars, labels=[f"{v:,}" for v in ordered["popular_repos"]], padding=3)
+    ax1.set_xlim(0, ordered["popular_repos"].max() * 1.15)
+
+    top = by_language.head(8).sort_values("repos")
+    bars = ax2.barh(top["language"], top["repos"], color="#b4460f")
+    ax2.set_title(f"Ngôn ngữ lập trình trong {TOP_N} repo nhiều sao nhất GitHub")
+    ax2.set_xlabel("Số repo")
+    ax2.bar_label(bars, padding=3)
+    ax2.set_xlim(0, top["repos"].max() * 1.15)
+
+    for ax in (ax1, ax2):
+        ax.spines[["top", "right"]].set_visible(False)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print(f"  Đã lưu biểu đồ: {path.name}")
+    plt.show()
 
 
-@app.route("/")
-def quiz():
-    questions = load_questions()
-    topics = [
-        (topic, group.to_dict("records"))
-        for topic, group in questions.groupby("topic", sort=False)
-    ]
-    return render_template("quiz.html", topics=topics, total=len(questions))
+# ----------------------------------------------------------------------------
+# CHƯƠNG TRÌNH CHÍNH
+# ----------------------------------------------------------------------------
+def main() -> None:
+    print("1. Lấy dữ liệu từ GitHub API...")
+    languages = fetch_language_stats()
+    top_repos = fetch_top_repos()
 
+    print("\n2. Phân tích dữ liệu...")
+    languages, by_language, excluded = analyze(languages, top_repos)
+    languages.to_csv(OUT_DIR / "github_languages.csv", index=False, encoding="utf-8-sig")
+    top_repos.to_csv(OUT_DIR / "github_top_repos.csv", index=False, encoding="utf-8-sig")
 
-@app.route("/submit", methods=["POST"])
-def submit():
-    graded = grade(load_questions(), request.form)
-    stats = topic_stats(graded)
-    save_attempt(graded)
+    print(f"\nSố repo có trên {MIN_STARS:,} sao theo ngôn ngữ:")
+    print(languages.to_string(index=False))
+    print(f"\nNgôn ngữ lập trình trong {TOP_N} repo nhiều sao nhất (kèm số sao trung bình):")
+    print(by_language.head(8).to_string(index=False))
+    print(f"({excluded} repo không có ngôn ngữ lập trình rõ ràng, như tài liệu hoặc danh sách tổng hợp, đã được loại khỏi bảng này)")
 
-    weak_topics = stats.loc[stats["weak"], "topic"].tolist()
-    return render_template(
-        "result.html",
-        score=int(graded["correct"].sum()),
-        total=len(graded),
-        stats=stats.to_dict("records"),
-        tips=[(topic, STUDY_TIPS.get(topic, "")) for topic in weak_topics],
-        wrong=graded[~graded["correct"]].to_dict("records"),
-    )
+    print("\nNhận xét:")
+    best = languages.iloc[0]
+    print(f"- {best['language']} có nhiều repo phổ biến nhất trong nhóm khảo sát: "
+          f"{best['popular_repos']:,} repo ({best['share_%']}%).")
+    leader = by_language.iloc[0]
+    print(f"- Trong {TOP_N} repo nhiều sao nhất, {leader['language']} xuất hiện nhiều nhất "
+          f"({leader['repos']} repo).")
+    enough = by_language[by_language["repos"] >= 3]  # bỏ nhóm quá ít repo để so sánh công bằng
+    star = enough.sort_values("avg_stars", ascending=False).iloc[0]
+    print(f"- Trong các ngôn ngữ có từ 3 repo trở lên, {star['language']} có số sao trung bình "
+          f"cao nhất: {star['avg_stars']:,} sao/repo.")
 
-
-@app.route("/history")
-def history():
-    data = load_history()
-    if data.empty:
-        return render_template("history.html", attempts=[], topics=[], best=None, average=None)
-
-    per_attempt = (
-        data.groupby(["attempt", "time"])
-        .agg(right=("correct", "sum"), total=("correct", "size"))
-        .reset_index()
-        .sort_values("attempt")
-    )
-    per_attempt["percent"] = (per_attempt["right"] / per_attempt["total"] * 100).round()
-
-    per_topic = data.groupby("topic", sort=False)["correct"].mean().reset_index(name="rate")
-    per_topic["weak"] = per_topic["rate"] < WEAK_THRESHOLD
-
-    return render_template(
-        "history.html",
-        attempts=per_attempt.to_dict("records"),
-        topics=per_topic.sort_values("rate").to_dict("records"),
-        best=int(per_attempt["percent"].max()),
-        average=int(round(per_attempt["percent"].mean())),
-    )
-
-
-@app.route("/reset", methods=["POST"])
-def reset():
-    HISTORY_CSV.unlink(missing_ok=True)
-    return redirect(url_for("history"))
+    print("\n3. Vẽ biểu đồ...")
+    draw_charts(languages, by_language, OUT_DIR / "github_analysis.png")
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    main()
